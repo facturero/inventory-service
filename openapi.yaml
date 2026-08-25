@@ -1,0 +1,582 @@
+openapi: 3.0.3
+
+info:
+  title: inventory-service API
+  version: 1.0.0
+  description: >
+    Inventario multi-bodega con valorización por estrategia intercambiable
+    (promedio ponderado / FIFO). Kardex atómico. Aislamiento por organization_id.
+
+
+    Convención universal: costos en centavos (BIGINT) + Dinero.js; cantidades como
+    DECIMAL(18,4) — precisión para gramos, litros, unidades fraccionarias.
+
+
+    Multi-bodega: el modelo aguanta N bodegas por organización; al onboarding se
+    auto-provisiona UNA bodega PRINCIPAL. El frontend puede ocultar el concepto
+    cuando solo hay una.
+
+
+    No verifica JWT: confía en cabeceras del gateway (X-Organization-Id, X-User-Id,
+    X-Country-Code, X-Permissions). Recurso de otra org → 404.
+
+servers:
+  - url: http://localhost:3010
+    description: Desarrollo local
+
+tags:
+  - name: health
+  - name: warehouses
+  - name: stock
+  - name: movements
+  - name: reservations
+  - name: transfers
+
+paths:
+
+  /health:
+    get:
+      tags: [health]
+      summary: Healthcheck
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  # -------------------------------------------------------------------------
+  # Bodegas
+  # -------------------------------------------------------------------------
+  /warehouses:
+    get:
+      tags: [warehouses]
+      summary: Listar bodegas de la organización
+      x-required-permission: inventory:read
+      parameters: [{ $ref: '#/components/parameters/OrgHeader' }]
+      responses:
+        '200':
+          description: Bodegas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Warehouse' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    post:
+      tags: [warehouses]
+      summary: Crear bodega
+      description: >
+        Si `isDefault: true`, la bodega actual default pierde el flag automáticamente
+        (siempre debe haber exactamente 1 default por organización).
+      x-required-permission: inventory:manage
+      parameters: [{ $ref: '#/components/parameters/OrgHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWarehouseRequest' }
+            examples:
+              sucursal:
+                value:
+                  code: SUC-NORTE
+                  name: Sucursal Norte Quito
+                  address: Av. República del Salvador 890
+                  establishmentId: null
+                  isDefault: false
+      responses:
+        '201':
+          description: Bodega creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Warehouse' }
+        '401': { $ref: '#/components/responses/OrgContextRequired' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Ya existe una bodega con ese código en la organización
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /warehouses/{id}:
+    get:
+      tags: [warehouses]
+      summary: Obtener bodega
+      x-required-permission: inventory:read
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { $ref: '#/components/parameters/WarehouseId' }
+      responses:
+        '200':
+          description: Bodega
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Warehouse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    patch:
+      tags: [warehouses]
+      summary: Actualizar bodega
+      x-required-permission: inventory:manage
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { $ref: '#/components/parameters/WarehouseId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWarehouseRequest' }
+      responses:
+        '200':
+          description: Actualizada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Warehouse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /warehouses/{id}/deactivate:
+    post:
+      tags: [warehouses]
+      summary: Desactivar bodega (falla si tiene stock > 0)
+      x-required-permission: inventory:manage
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { $ref: '#/components/parameters/WarehouseId' }
+      responses:
+        '204': { description: Desactivada }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Tiene stock > 0
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: WAREHOUSE_HAS_STOCK, message: No se puede desactivar una bodega con stock. }
+
+  # -------------------------------------------------------------------------
+  # Stock (posiciones actuales)
+  # -------------------------------------------------------------------------
+  /stock:
+    get:
+      tags: [stock]
+      summary: Consultar posiciones de stock
+      description: >
+        Retorna las posiciones filtradas. Si no se filtra por producto ni bodega,
+        devuelve todas las posiciones activas con paginación.
+      x-required-permission: inventory:read
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { name: productId, in: query, schema: { type: string, format: uuid } }
+        - { name: warehouseId, in: query, schema: { type: string, format: uuid } }
+        - { name: lowStock, in: query, schema: { type: boolean }, description: Solo posiciones con quantity_available bajo el punto de reorden (fase 2) }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        '200':
+          description: Posiciones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockPosition' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+
+  /stock/products/{productId}:
+    get:
+      tags: [stock]
+      summary: Posición de un producto en todas las bodegas
+      description: Vista rápida "cuánto tengo de este producto y dónde".
+      x-required-permission: inventory:read
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { name: productId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Posiciones por bodega + totales
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  productId: { type: string, format: uuid }
+                  totalOnHand: { type: string, example: "158.5000" }
+                  totalReserved: { type: string, example: "10.0000" }
+                  totalAvailable: { type: string, example: "148.5000" }
+                  positions:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockPosition' }
+
+  # -------------------------------------------------------------------------
+  # Movimientos (kardex)
+  # -------------------------------------------------------------------------
+  /stock/movements:
+    get:
+      tags: [movements]
+      summary: Kardex de movimientos
+      x-required-permission: inventory:read
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { name: productId, in: query, schema: { type: string, format: uuid } }
+        - { name: warehouseId, in: query, schema: { type: string, format: uuid } }
+        - { name: type, in: query, schema: { $ref: '#/components/schemas/MovementType' } }
+        - { name: referenceType, in: query, schema: { type: string, example: invoice } }
+        - { name: referenceId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        '200':
+          description: Movimientos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/StockMovement' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+
+  /stock/adjustments:
+    post:
+      tags: [movements]
+      summary: Ajuste manual de stock
+      description: >
+        Genera un movimiento `adjustment_in` o `adjustment_out` según el signo de
+        `quantity`. Para entradas, se requiere `unitCost` para valorizar. Emite
+        `inventory.stock.adjusted`.
+      x-required-permission: inventory:adjust
+      parameters: [{ $ref: '#/components/parameters/OrgHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdjustStockRequest' }
+            examples:
+              entrada:
+                value:
+                  productId: 3f1a2b…
+                  warehouseId: 5e2c8d…
+                  quantity: "50.0000"
+                  unitCost: "12.50"
+                  currencyCode: USD
+                  reason: Conteo físico enero
+              salida:
+                value:
+                  productId: 3f1a2b…
+                  warehouseId: 5e2c8d…
+                  quantity: "-3.0000"
+                  reason: Merma por avería
+      responses:
+        '201':
+          description: Ajuste registrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockMovement' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  # -------------------------------------------------------------------------
+  # Transferencias entre bodegas
+  # -------------------------------------------------------------------------
+  /stock/transfers:
+    post:
+      tags: [transfers]
+      summary: Transferir stock entre bodegas
+      description: >
+        Genera dos movimientos atómicos (`transfer_out` en origen, `transfer_in` en
+        destino) en la misma transacción. Emite `inventory.stock.transferred`.
+      x-required-permission: inventory:transfer
+      parameters: [{ $ref: '#/components/parameters/OrgHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransferRequest' }
+      responses:
+        '201':
+          description: Transferencia registrada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outMovement: { $ref: '#/components/schemas/StockMovement' }
+                  inMovement: { $ref: '#/components/schemas/StockMovement' }
+        '422':
+          description: Stock insuficiente en la bodega origen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # -------------------------------------------------------------------------
+  # Reservas (flujo híbrido con billing)
+  # -------------------------------------------------------------------------
+  /stock/reservations:
+    post:
+      tags: [reservations]
+      summary: Reservar stock
+      description: >
+        Reserva unidades para una referencia externa (ej. borrador de factura).
+        Si el producto tiene `allow_negative_stock: false` y no hay suficiente
+        disponible → 422 INSUFFICIENT_STOCK.
+      x-required-permission: inventory:reserve
+      parameters: [{ $ref: '#/components/parameters/OrgHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReserveRequest' }
+      responses:
+        '201':
+          description: Reserva creada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Reservation' }
+        '422':
+          description: Stock insuficiente
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: INSUFFICIENT_STOCK, message: Solo hay 3 unidades disponibles. }
+
+  /stock/reservations/{referenceType}/{referenceId}/confirm:
+    post:
+      tags: [reservations]
+      summary: Confirmar reservas por referencia
+      description: >
+        Convierte todas las reservas activas de una referencia (ej. una factura)
+        en salidas reales de stock. Aplica la valuationStrategy del producto.
+        Emite `inventory.stock.consumed` por cada línea.
+      x-required-permission: inventory:reserve
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { name: referenceType, in: path, required: true, schema: { type: string, example: invoice } }
+        - { name: referenceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Reservas confirmadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StockMovement' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Reserva ya resuelta
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /stock/reservations/{referenceType}/{referenceId}/release:
+    post:
+      tags: [reservations]
+      summary: Liberar reservas por referencia
+      description: >
+        Marca las reservas como released, decrementa quantity_reserved. Emite
+        `inventory.reservation.released`.
+      x-required-permission: inventory:reserve
+      parameters:
+        - { $ref: '#/components/parameters/OrgHeader' }
+        - { name: referenceType, in: path, required: true, schema: { type: string } }
+        - { name: referenceId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Liberadas }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    OrgHeader:
+      name: X-Organization-Id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    WarehouseId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+
+    MovementType:
+      type: string
+      enum:
+        - purchase_in
+        - sale_out
+        - transfer_out
+        - transfer_in
+        - adjustment_in
+        - adjustment_out
+        - reservation
+        - release
+        - opening_balance
+
+    Warehouse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        code: { type: string, example: PRINCIPAL }
+        name: { type: string, example: Bodega Central }
+        address: { type: string, nullable: true }
+        isDefault: { type: boolean }
+        status: { type: string, enum: [active, inactive] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    StockPosition:
+      type: object
+      description: Posición de stock de un producto en una bodega específica.
+      properties:
+        id: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        warehouseCode: { type: string, example: PRINCIPAL, description: Denormalizado para display. }
+        quantityOnHand: { type: string, example: "158.5000", description: Física en bodega (DECIMAL 18/4). }
+        quantityReserved: { type: string, example: "10.0000" }
+        quantityAvailable: { type: string, example: "148.5000", description: on_hand - reserved. }
+        averageCost: { type: string, example: "12.50", description: Costo promedio (unidad principal). }
+        averageCostCents: { type: integer, format: int64, example: 1250, description: Costo promedio en centavos. }
+        currencyCode: { type: string, example: USD }
+        updatedAt: { type: string, format: date-time }
+
+    StockMovement:
+      type: object
+      description: Un movimiento del kardex (inmutable una vez creado).
+      properties:
+        id: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/MovementType' }
+        quantity: { type: string, example: "50.0000", description: Siempre positivo; el `type` indica signo lógico. }
+        unitCost: { type: string, nullable: true, example: "12.50" }
+        unitCostCents: { type: integer, format: int64, nullable: true, example: 1250 }
+        totalCost: { type: string, nullable: true, example: "625.00" }
+        totalCostCents: { type: integer, format: int64, nullable: true }
+        currencyCode: { type: string, example: USD }
+        referenceType: { type: string, nullable: true, example: invoice }
+        referenceId: { type: string, format: uuid, nullable: true }
+        notes: { type: string, nullable: true }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+
+    Reservation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        quantity: { type: string, example: "3.0000" }
+        referenceType: { type: string, example: invoice_draft }
+        referenceId: { type: string, format: uuid }
+        status: { type: string, enum: [active, confirmed, released, expired] }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    # --- Requests -----------------------------------------------------------
+
+    CreateWarehouseRequest:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string, maxLength: 20, example: SUC-NORTE }
+        name: { type: string, maxLength: 255 }
+        address: { type: string, maxLength: 255 }
+        establishmentId: { type: string, format: uuid, description: Ref opcional a organization.establishments. }
+        isDefault: { type: boolean, default: false, description: Si true, quita el flag a la actual default. }
+
+    UpdateWarehouseRequest:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        address: { type: string, maxLength: 255 }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        isDefault: { type: boolean }
+
+    AdjustStockRequest:
+      type: object
+      required: [productId, warehouseId, quantity, reason]
+      properties:
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        quantity: { type: string, description: DECIMAL string con signo. Positivo = entrada, negativo = salida. }
+        unitCost: { type: string, description: Requerido para entradas (ajustes positivos). No aplica para salidas. }
+        currencyCode: { type: string, minLength: 3, maxLength: 3, example: USD }
+        reason: { type: string, maxLength: 255 }
+
+    TransferRequest:
+      type: object
+      required: [productId, fromWarehouseId, toWarehouseId, quantity]
+      properties:
+        productId: { type: string, format: uuid }
+        fromWarehouseId: { type: string, format: uuid }
+        toWarehouseId: { type: string, format: uuid }
+        quantity: { type: string, example: "10.0000" }
+        notes: { type: string }
+
+    ReserveRequest:
+      type: object
+      required: [productId, warehouseId, quantity, referenceType, referenceId]
+      properties:
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        quantity: { type: string, example: "3.0000" }
+        referenceType: { type: string, example: invoice_draft }
+        referenceId: { type: string, format: uuid }
+        expiresAt: { type: string, format: date-time, description: TTL opcional. }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              message: { type: string }
+
+  responses:
+    ValidationError:
+      description: Error de validación
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    OrgContextRequired:
+      description: Falta X-Organization-Id
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: ORG_CONTEXT_REQUIRED, message: Falta el contexto de organización. }
+    Forbidden:
+      description: Permiso insuficiente
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: FORBIDDEN, message: Permiso insuficiente. }
+    NotFound:
+      description: No encontrado o de otra organización
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: WAREHOUSE_NOT_FOUND, message: Bodega no encontrada. }

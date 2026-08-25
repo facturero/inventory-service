@@ -1,0 +1,524 @@
+asyncapi: 3.0.0
+
+info:
+  title: inventory-service — Eventos
+  version: 1.0.0
+  description: >
+    Eventos de inventory-service sobre RabbitMQ. Publica el ciclo del stock
+    (entradas, salidas, ajustes, transferencias, reservas). Consume eventos de
+    organization (bodegas por establecimiento), product (read-model), billing
+    (facturación) y purchase-service (compras, futuro).
+
+
+    Los payloads llevan siempre `productId + warehouseId + quantity` para que
+    los consumidores puedan reconstruir el estado del kardex.
+
+
+    Patrón Outbox + processed_events. Exchange topic `crm.events`.
+
+defaultContentType: application/json
+
+servers:
+  rabbitmq:
+    host: localhost:5672
+    protocol: amqp
+    bindings:
+      amqp:
+        vhost: /
+
+channels:
+
+  warehouseCreated:
+    address: inventory.warehouse.created
+    description: Se creó una bodega.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      warehouseCreated: { $ref: '#/components/messages/WarehouseCreated' }
+
+  stockEntered:
+    address: inventory.stock.entered
+    description: Entrada de stock (compra, ajuste positivo, transferencia entrante, reposición por anulación).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockEntered: { $ref: '#/components/messages/StockMovementEvent' }
+
+  stockConsumed:
+    address: inventory.stock.consumed
+    description: Salida de stock (venta confirmada, ajuste negativo, transferencia saliente).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockConsumed: { $ref: '#/components/messages/StockMovementEvent' }
+
+  stockAdjusted:
+    address: inventory.stock.adjusted
+    description: Ajuste manual con motivo (conteo físico, merma, avería, corrección).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockAdjusted: { $ref: '#/components/messages/StockMovementEvent' }
+
+  stockTransferred:
+    address: inventory.stock.transferred
+    description: Transferencia entre bodegas (payload lleva both from/to).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockTransferred: { $ref: '#/components/messages/StockTransferredEvent' }
+
+  stockReserved:
+    address: inventory.stock.reserved
+    description: Reserva de stock (ej. borrador de factura).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockReserved: { $ref: '#/components/messages/ReservationEvent' }
+
+  reservationReleased:
+    address: inventory.reservation.released
+    description: Reserva liberada (borrador descartado, o release explícito).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      reservationReleased: { $ref: '#/components/messages/ReservationEvent' }
+
+  stockNegative:
+    address: inventory.stock.negative
+    description: >
+      Alerta: una salida dejó la posición debajo de cero. Solo se emite cuando el
+      producto tiene `allow_negative_stock: true`. Los consumidores (notification,
+      dashboards) muestran alerta al usuario.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockNegative: { $ref: '#/components/messages/StockNegativeEvent' }
+
+  # ---- Consumidos ----
+
+  orgUpdated:
+    address: organization.org.updated
+    description: (Consumido) organization completó perfil fiscal. Auto-provisiona bodega PRINCIPAL.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      orgUpdated: { $ref: '#/components/messages/OrgUpdatedEvent' }
+
+  establishmentCreated:
+    address: organization.establishment.created
+    description: (Consumido) se creó un establecimiento. Opcional: auto-provisiona bodega asociada.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      establishmentCreated: { $ref: '#/components/messages/EstablishmentCreatedEvent' }
+
+  productCreated:
+    address: product.product.created
+    description: (Consumido) product creado. Alimenta el read-model local con trackStock, allowNegativeStock, valuationMethod, status.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      productCreated: { $ref: '#/components/messages/ProductCreatedEvent' }
+
+  productUpdated:
+    address: product.product.updated
+    description: >
+      (Consumido) product actualizado. Refresca el read-model local. Los cambios de
+      `valuationMethod` NO afectan movimientos ya registrados (estos conservan su costo
+      histórico); solo aplican a movimientos futuros.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      productUpdated: { $ref: '#/components/messages/ProductUpdatedEvent' }
+
+  productDisabled:
+    address: product.product.disabled
+    description: (Consumido) product desactivado. Marca status='inactive' en el read-model.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      productDisabled: { $ref: '#/components/messages/ProductDisabledEvent' }
+
+  invoiceIssued:
+    address: billing.invoice.issued
+    description: >
+      (Consumido) billing emitió factura. Por cada línea con producto tracked:
+      si hay reserva activa por invoice_draft, la confirma; si no, genera sale_out
+      directo (validando allow_negative_stock).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      invoiceIssued: { $ref: '#/components/messages/InvoiceIssuedEvent' }
+
+  invoiceVoided:
+    address: billing.invoice.voided
+    description: >
+      (Consumido) billing anuló factura. Reposición del stock: genera adjustment_in
+      con el costo del movimiento original (buscado por reference).
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      invoiceVoided: { $ref: '#/components/messages/InvoiceVoidedEvent' }
+
+  purchaseReceived:
+    address: purchase.purchase_order.received
+    description: >
+      (Consumido, FUTURO) purchase-service registra la recepción de mercadería.
+      Genera purchase_in con unitCost del proveedor. Aplica ValuationStrategy.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      purchaseReceived: { $ref: '#/components/messages/PurchaseReceivedEvent' }
+
+operations:
+
+  publishWarehouseCreated:
+    action: send
+    channel: { $ref: '#/channels/warehouseCreated' }
+
+  publishStockEntered:
+    action: send
+    channel: { $ref: '#/channels/stockEntered' }
+    summary: Entrada (purchase_in, adjustment_in, transfer_in, compensación por voided).
+
+  publishStockConsumed:
+    action: send
+    channel: { $ref: '#/channels/stockConsumed' }
+    summary: Salida confirmada (sale_out, transfer_out).
+
+  publishStockAdjusted:
+    action: send
+    channel: { $ref: '#/channels/stockAdjusted' }
+
+  publishStockTransferred:
+    action: send
+    channel: { $ref: '#/channels/stockTransferred' }
+
+  publishStockReserved:
+    action: send
+    channel: { $ref: '#/channels/stockReserved' }
+
+  publishReservationReleased:
+    action: send
+    channel: { $ref: '#/channels/reservationReleased' }
+
+  publishStockNegative:
+    action: send
+    channel: { $ref: '#/channels/stockNegative' }
+
+  consumeOrgUpdated:
+    action: receive
+    channel: { $ref: '#/channels/orgUpdated' }
+    summary: Auto-provisiona bodega PRINCIPAL (idempotente).
+
+  consumeEstablishmentCreated:
+    action: receive
+    channel: { $ref: '#/channels/establishmentCreated' }
+
+  consumeProductCreated:
+    action: receive
+    channel: { $ref: '#/channels/productCreated' }
+    summary: Alta en el read-model local de producto.
+
+  consumeProductUpdated:
+    action: receive
+    channel: { $ref: '#/channels/productUpdated' }
+    summary: Actualiza read-model local de producto.
+
+  consumeProductDisabled:
+    action: receive
+    channel: { $ref: '#/channels/productDisabled' }
+    summary: Marca producto como inactivo en el read-model local.
+
+  consumeInvoiceIssued:
+    action: receive
+    channel: { $ref: '#/channels/invoiceIssued' }
+    summary: Confirma reserva o genera sale_out directo por cada línea tracked.
+
+  consumeInvoiceVoided:
+    action: receive
+    channel: { $ref: '#/channels/invoiceVoided' }
+    summary: Repone stock con adjustment_in al costo original.
+
+  consumePurchaseReceived:
+    action: receive
+    channel: { $ref: '#/channels/purchaseReceived' }
+    summary: Registra purchase_in aplicando ValuationStrategy.
+
+components:
+
+  messageTraits:
+    eventEnvelope:
+      headers:
+        type: object
+        required: [eventId, type, occurredAt]
+        properties:
+          eventId: { type: string, format: uuid }
+          type: { type: string }
+          occurredAt: { type: string, format: date-time }
+          organizationId: { type: string, format: uuid, nullable: true }
+
+  messages:
+    WarehouseCreated:
+      name: inventory.warehouse.created
+      title: Bodega creada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/WarehousePayload' }
+
+    StockMovementEvent:
+      name: inventory.stock.movement
+      title: Movimiento de stock (entrada/salida/ajuste)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/StockMovementPayload' }
+
+    StockTransferredEvent:
+      name: inventory.stock.transferred
+      title: Transferencia entre bodegas
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/StockTransferPayload' }
+
+    ReservationEvent:
+      name: inventory.reservation
+      title: Reserva creada / liberada
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ReservationPayload' }
+
+    StockNegativeEvent:
+      name: inventory.stock.negative
+      title: Alerta de stock negativo
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/StockNegativePayload' }
+
+    OrgUpdatedEvent:
+      name: organization.org.updated
+      title: Organización actualizada (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/OrgUpdatedPayload' }
+
+    EstablishmentCreatedEvent:
+      name: organization.establishment.created
+      title: Establecimiento creado (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/EstablishmentCreatedPayload' }
+
+    ProductCreatedEvent:
+      name: product.product.created
+      title: Producto creado (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ProductEventPayload' }
+
+    ProductUpdatedEvent:
+      name: product.product.updated
+      title: Producto actualizado (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/ProductEventPayload' }
+
+    ProductDisabledEvent:
+      name: product.product.disabled
+      title: Producto desactivado (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload:
+        type: object
+        required: [productId, organizationId]
+        properties:
+          productId: { type: string, format: uuid }
+          organizationId: { type: string, format: uuid }
+
+    InvoiceIssuedEvent:
+      name: billing.invoice.issued
+      title: Factura emitida (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/InvoiceIssuedPayload' }
+
+    InvoiceVoidedEvent:
+      name: billing.invoice.voided
+      title: Factura anulada (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/InvoiceVoidedPayload' }
+
+    PurchaseReceivedEvent:
+      name: purchase.purchase_order.received
+      title: Recepción de compra (consumido, futuro)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/PurchaseReceivedPayload' }
+
+  schemas:
+
+    WarehousePayload:
+      type: object
+      required: [warehouseId, organizationId, code, name, isDefault]
+      properties:
+        warehouseId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        code: { type: string }
+        name: { type: string }
+        isDefault: { type: boolean }
+
+    StockMovementPayload:
+      type: object
+      required: [movementId, organizationId, productId, warehouseId, type, quantity]
+      properties:
+        movementId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [purchase_in, sale_out, transfer_out, transfer_in, adjustment_in, adjustment_out, opening_balance]
+        quantity: { type: string, description: DECIMAL string. Siempre positivo; el `type` indica signo lógico. }
+        unitCostCents: { type: integer, format: int64, nullable: true }
+        totalCostCents: { type: integer, format: int64, nullable: true }
+        currencyCode: { type: string, example: USD }
+        referenceType: { type: string, nullable: true, description: 'invoice, purchase_order, adjustment, transfer' }
+        referenceId: { type: string, format: uuid, nullable: true }
+        newOnHand: { type: string, description: Posición on_hand tras el movimiento. }
+        newAverageCostCents: { type: integer, format: int64, description: Nuevo promedio (para valorización weighted_average). }
+
+    StockTransferPayload:
+      type: object
+      required: [organizationId, productId, fromWarehouseId, toWarehouseId, quantity]
+      properties:
+        organizationId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        fromWarehouseId: { type: string, format: uuid }
+        toWarehouseId: { type: string, format: uuid }
+        quantity: { type: string }
+        outMovementId: { type: string, format: uuid }
+        inMovementId: { type: string, format: uuid }
+        unitCostCents: { type: integer, format: int64, description: Costo transferido (mantiene la valorización). }
+        currencyCode: { type: string }
+
+    ReservationPayload:
+      type: object
+      required: [reservationId, organizationId, productId, warehouseId, quantity, referenceType, referenceId, status]
+      properties:
+        reservationId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        quantity: { type: string }
+        referenceType: { type: string }
+        referenceId: { type: string, format: uuid }
+        status: { type: string, enum: [active, confirmed, released, expired] }
+
+    StockNegativePayload:
+      type: object
+      description: Se dispara SOLO si el producto tiene allow_negative_stock=true y la salida dejó la posición debajo de 0.
+      required: [organizationId, productId, warehouseId, currentOnHand]
+      properties:
+        organizationId: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        currentOnHand: { type: string, example: "-3.5000" }
+
+    # --- Payloads de eventos consumidos ---
+
+    OrgUpdatedPayload:
+      type: object
+      required: [organizationId]
+      properties:
+        organizationId: { type: string, format: uuid }
+        countryCode: { type: string, nullable: true }
+        name: { type: string }
+
+    EstablishmentCreatedPayload:
+      type: object
+      required: [establishmentId, organizationId, code]
+      properties:
+        establishmentId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+
+    ProductEventPayload:
+      type: object
+      required: [productId, organizationId, name, type, trackStock, allowNegativeStock, valuationMethod, status]
+      properties:
+        productId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        sku: { type: string, nullable: true }
+        name: { type: string }
+        type: { type: string, enum: [good, service] }
+        trackStock: { type: boolean, description: Si false, inventory no lleva stock de este producto. }
+        allowNegativeStock: { type: boolean, description: Si true, billing puede vender sin stock; solo alerta. }
+        valuationMethod: { type: string, enum: [weighted_average, fifo] }
+        status: { type: string, enum: [active, inactive] }
+
+    InvoiceIssuedPayload:
+      type: object
+      required: [invoiceId, organizationId, warehouseId, lines]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        warehouseId:
+          type: string
+          format: uuid
+          description: >
+            Bodega desde la que sale el stock. billing la selecciona (típicamente
+            la default de la organización, o la del punto de emisión).
+        lines:
+          type: array
+          items:
+            type: object
+            required: [productId, quantity]
+            properties:
+              lineId: { type: string, format: uuid }
+              productId: { type: string, format: uuid }
+              quantity: { type: string }
+
+    InvoiceVoidedPayload:
+      type: object
+      required: [invoiceId, organizationId]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        reason: { type: string, nullable: true }
+
+    PurchaseReceivedPayload:
+      type: object
+      required: [purchaseOrderId, organizationId, warehouseId, lines]
+      properties:
+        purchaseOrderId: { type: string, format: uuid }
+        organizationId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        lines:
+          type: array
+          items:
+            type: object
+            required: [productId, quantity, unitCostCents, currencyCode]
+            properties:
+              productId: { type: string, format: uuid }
+              quantity: { type: string }
+              unitCostCents: { type: integer, format: int64 }
+              currencyCode: { type: string }
