@@ -20,8 +20,27 @@ info:
     No verifica JWT: confía en cabeceras del gateway (X-Organization-Id, X-User-Id,
     X-Country-Code, X-Permissions). Recurso de otra org → 404.
 
+
+    Bodega de la venta: cada establecimiento tiene su bodega auto-provisionada. La factura
+    descuenta de la bodega de su establecimiento emisor; si no existe, de la PRINCIPAL.
+
+
+    Contabilidad: todo movimiento del kardex declara su accounting_nature. El libro mayor
+    todavía no existe; la columna está para que los asientos futuros salgan del histórico
+    sin reclasificarlo a mano.
+
+
+    Reservas: las rutas /stock/reservations están marcadas x-phase: 2 y NO se montan en
+    esta fase. La venta descuenta al emitir, no en borrador.
+
+
+    MÓDULO DE PAGO: sin el plugin inventory.kardex activo no se lleva inventario. El gateway
+    corta el HTTP con requiresPlugin; el corte del camino de eventos vive dentro del servicio,
+    porque los mensajes de RabbitMQ no pasan por el gateway. Al reactivar, el stock arrastra
+    un hueco y GET /stock lo declara.
+
 servers:
-  - url: http://localhost:3010
+  - url: http://localhost:3013
     description: Desarrollo local
 
 tags:
@@ -174,7 +193,14 @@ paths:
         - { $ref: '#/components/parameters/OrgHeader' }
         - { name: productId, in: query, schema: { type: string, format: uuid } }
         - { name: warehouseId, in: query, schema: { type: string, format: uuid } }
-        - { name: lowStock, in: query, schema: { type: boolean }, description: Solo posiciones con quantity_available bajo el punto de reorden (fase 2) }
+        - name: stockState
+          in: query
+          schema: { type: string, enum: [with_stock, without_stock] }
+          description: >
+            Filtra por existencia. `with_stock` deja las posiciones con cantidad mayor que
+            cero; `without_stock`, las que están exactamente en cero. Omitirlo devuelve
+            ambas.
+        - { name: lowStock, in: query, schema: { type: boolean }, description: Punto de reorden — fase 2, todavía sin efecto }
         - { name: page, in: query, schema: { type: integer, default: 1 } }
         - { name: pageSize, in: query, schema: { type: integer, default: 50 } }
       responses:
@@ -191,6 +217,13 @@ paths:
                   page: { type: integer }
                   pageSize: { type: integer }
                   total: { type: integer }
+                  staleWarning:
+                    allOf: [{ $ref: '#/components/schemas/StaleWarning' }]
+                    nullable: true
+                    description: >
+                      Presente solo si el módulo estuvo desactivado y todavía nadie ha hecho
+                      el conteo físico posterior. Mientras esté presente, estas cifras no son
+                      confiables y el frontend debe decirlo.
 
   /stock/products/{productId}:
     get:
@@ -324,12 +357,15 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
 
   # -------------------------------------------------------------------------
-  # Reservas (flujo híbrido con billing)
+  # Reservas — FASE 2. Diseñadas, no montadas.
+  # La tabla `reservations` se crea vacía para no migrar después, pero ningún
+  # caso de uso la escribe y estas tres rutas no se registran en el router.
   # -------------------------------------------------------------------------
   /stock/reservations:
     post:
       tags: [reservations]
       summary: Reservar stock
+      x-phase: 2   # NO montada en fase 1
       description: >
         Reserva unidades para una referencia externa (ej. borrador de factura).
         Si el producto tiene `allow_negative_stock: false` y no hay suficiente
@@ -358,6 +394,7 @@ paths:
     post:
       tags: [reservations]
       summary: Confirmar reservas por referencia
+      x-phase: 2   # NO montada en fase 1
       description: >
         Convierte todas las reservas activas de una referencia (ej. una factura)
         en salidas reales de stock. Aplica la valuationStrategy del producto.
@@ -386,6 +423,7 @@ paths:
     post:
       tags: [reservations]
       summary: Liberar reservas por referencia
+      x-phase: 2   # NO montada en fase 1
       description: >
         Marca las reservas como released, decrementa quantity_reserved. Emite
         `inventory.reservation.released`.
@@ -415,6 +453,9 @@ components:
 
     MovementType:
       type: string
+      description: >
+        `reservation` y `release` existen en el enum pero no se emiten en esta fase:
+        el flujo de reserva está fuera de alcance.
       enum:
         - purchase_in
         - sale_out
@@ -426,12 +467,43 @@ components:
         - release
         - opening_balance
 
+    AccountingNature:
+      type: string
+      description: >
+        Qué significa el movimiento para la contabilidad. Se escribe siempre, aunque el
+        libro mayor todavía no exista: es lo que permitirá generar asientos del histórico
+        sin reclasificarlo a mano.
+      enum:
+        - inventory_in        # compra, saldo inicial, reposición por anulación
+        - inventory_gain      # sobrante de conteo físico
+        - cogs                # costo de ventas
+        - expense             # consumo interno (suministros, empaque a futuro)
+        - shrinkage           # merma: avería, vencimiento, robo, faltante de conteo
+        - internal_transfer   # traslado entre bodegas, sin efecto en resultados
+
+    AdjustmentReasonCode:
+      type: string
+      description: >
+        Motivo tipificado del ajuste. De él y del signo de la cantidad se deriva
+        `accountingNature`. El campo `reason` de texto libre sigue existiendo como nota.
+      enum:
+        - physical_count   # +inventory_gain / -shrinkage
+        - damage           # -shrinkage
+        - expiration       # -shrinkage
+        - theft            # -shrinkage
+        - internal_use     # -expense
+        - correction       # +inventory_gain / -shrinkage
+
     Warehouse:
       type: object
       properties:
         id: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
-        establishmentId: { type: string, format: uuid, nullable: true }
+        establishmentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Un establecimiento tiene como mucho una bodega. Único por organización.
         code: { type: string, example: PRINCIPAL }
         name: { type: string, example: Bodega Central }
         address: { type: string, nullable: true }
@@ -439,6 +511,18 @@ components:
         status: { type: string, enum: [active, inactive] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+
+    StaleWarning:
+      type: object
+      description: >
+        El módulo de inventario estuvo apagado. Durante ese tiempo se siguió vendiendo y el
+        kardex no lo vio. No se reprocesa nada: la salida es un conteo físico cargado con
+        POST /stock/adjustments o con el saldo inicial.
+      required: [startedAt, endedAt, skippedMovements]
+      properties:
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time }
+        skippedMovements: { type: integer, example: 412, description: Movimientos que se dejaron de escribir. }
 
     StockPosition:
       type: object
@@ -450,8 +534,8 @@ components:
         warehouseId: { type: string, format: uuid }
         warehouseCode: { type: string, example: PRINCIPAL, description: Denormalizado para display. }
         quantityOnHand: { type: string, example: "158.5000", description: Física en bodega (DECIMAL 18/4). }
-        quantityReserved: { type: string, example: "10.0000" }
-        quantityAvailable: { type: string, example: "148.5000", description: on_hand - reserved. }
+        quantityReserved: { type: string, example: "0.0000", description: Siempre 0 en esta fase; no hay reservas. }
+        quantityAvailable: { type: string, example: "158.5000", description: on_hand - reserved. Hoy igual a on_hand. }
         averageCost: { type: string, example: "12.50", description: Costo promedio (unidad principal). }
         averageCostCents: { type: integer, format: int64, example: 1250, description: Costo promedio en centavos. }
         currencyCode: { type: string, example: USD }
@@ -467,12 +551,32 @@ components:
         type: { $ref: '#/components/schemas/MovementType' }
         quantity: { type: string, example: "50.0000", description: Siempre positivo; el `type` indica signo lógico. }
         unitCost: { type: string, nullable: true, example: "12.50" }
-        unitCostCents: { type: integer, format: int64, nullable: true, example: 1250 }
+        unitCostCents:
+          type: integer
+          format: int64
+          nullable: true
+          example: 1250
+          description: >
+            SOLO PARA MOSTRAR. En una salida FIFO que consume varias capas a costos
+            distintos no existe un costo unitario: este valor es total/cantidad redondeado.
+            Toda aritmética posterior parte de totalCostCents, nunca de aquí.
         totalCost: { type: string, nullable: true, example: "625.00" }
-        totalCostCents: { type: integer, format: int64, nullable: true }
+        totalCostCents:
+          type: integer
+          format: int64
+          nullable: true
+          description: Valor autoritativo del movimiento. Suma exacta de lo consumido o ingresado.
         currencyCode: { type: string, example: USD }
         referenceType: { type: string, nullable: true, example: invoice }
         referenceId: { type: string, format: uuid, nullable: true }
+        accountingNature: { $ref: '#/components/schemas/AccountingNature' }
+        reasonCode:
+          $ref: '#/components/schemas/AdjustmentReasonCode'
+        lotId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Reservado para trazabilidad por lote. Siempre null en esta fase.
         notes: { type: string, nullable: true }
         createdBy: { type: string, format: uuid }
         createdAt: { type: string, format: date-time }
@@ -512,14 +616,20 @@ components:
 
     AdjustStockRequest:
       type: object
-      required: [productId, warehouseId, quantity, reason]
+      required: [productId, warehouseId, quantity, reasonCode]
       properties:
         productId: { type: string, format: uuid }
         warehouseId: { type: string, format: uuid }
         quantity: { type: string, description: DECIMAL string con signo. Positivo = entrada, negativo = salida. }
-        unitCost: { type: string, description: Requerido para entradas (ajustes positivos). No aplica para salidas. }
+        unitCost:
+          type: string
+          description: >
+            Solo para entradas con costo real de fuera. Un sobrante de conteo físico se
+            omite y entra al promedio vigente de la posición. No aplica para salidas.
         currencyCode: { type: string, minLength: 3, maxLength: 3, example: USD }
-        reason: { type: string, maxLength: 255 }
+        reasonCode:
+          $ref: '#/components/schemas/AdjustmentReasonCode'
+        reason: { type: string, maxLength: 255, description: Nota libre para el humano. No decide la contabilidad. }
 
     TransferRequest:
       type: object

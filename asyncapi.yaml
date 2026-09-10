@@ -16,6 +16,18 @@ info:
 
     Patrón Outbox + processed_events. Exchange topic `crm.events`.
 
+
+    NINGÚN evento de este servicio queda sin consumir. audit-log-service bindea `#` con
+    denylist vacía, así que todo lo que se publique aquí acaba como fila en audit_db. Eso
+    NO es motivo para publicar de más: cada evento emitido es una fila de bitácora que
+    alguien paga en disco y en ruido. Antes de añadir un evento nuevo, ver la sección de
+    volumen en IMPLEMENTATION.md.
+
+
+    Requisito de la bitácora: todo mensaje debe llevar `eventId` en headers y
+    `organizationId` en el payload. Sin lo primero audit lo descarta con warn; sin lo
+    segundo lo considera no auditable. El relay del outbox ya pone el header.
+
 defaultContentType: application/json
 
 servers:
@@ -39,7 +51,9 @@ channels:
 
   stockEntered:
     address: inventory.stock.entered
-    description: Entrada de stock (compra, ajuste positivo, transferencia entrante, reposición por anulación).
+    description: >
+      Entrada de stock: compra, ajuste positivo, saldo inicial, reposición por anulación.
+      NO se emite por transferencia: el traslado publica un único inventory.stock.transferred.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
@@ -48,7 +62,9 @@ channels:
 
   stockConsumed:
     address: inventory.stock.consumed
-    description: Salida de stock (venta confirmada, ajuste negativo, transferencia saliente).
+    description: >
+      Salida de stock: venta, ajuste negativo. NO se emite por transferencia: el traslado
+      publica un único inventory.stock.transferred, aunque escriba dos filas de kardex.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
@@ -66,13 +82,16 @@ channels:
 
   stockTransferred:
     address: inventory.stock.transferred
-    description: Transferencia entre bodegas (payload lleva both from/to).
+    description: >
+      Transferencia entre bodegas. UN solo evento para las dos filas de kardex: el payload
+      lleva origen, destino y los dos movementId. Es una acción del usuario, no dos.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
     messages:
       stockTransferred: { $ref: '#/components/messages/StockTransferredEvent' }
 
+  # stockReserved y reservationReleased: FASE 2. Nadie los publica en esta fase.
   stockReserved:
     address: inventory.stock.reserved
     description: Reserva de stock (ej. borrador de factura).
@@ -94,16 +113,53 @@ channels:
   stockNegative:
     address: inventory.stock.negative
     description: >
-      Alerta: una salida dejó la posición debajo de cero. Solo se emite cuando el
-      producto tiene `allow_negative_stock: true`. Los consumidores (notification,
-      dashboards) muestran alerta al usuario.
+      Alerta: una salida dejó la posición debajo de cero. Se emite SIEMPRE que ocurra,
+      tenga el producto `allow_negative_stock` en true o en false. El inventario nunca
+      se niega a registrar una salida ya facturada: la mercadería salió del local y el
+      kardex debe decirlo. El flag solo indica si esto era esperado o es una incidencia
+      que alguien debe revisar. Los consumidores (notification, dashboards) alertan.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
     messages:
       stockNegative: { $ref: '#/components/messages/StockNegativeEvent' }
 
+  stockStale:
+    address: inventory.stock.stale
+    description: >
+      El modulo estuvo desactivado y volvio. Durante ese hueco se siguio vendiendo y el
+      kardex no lo vio, asi que el stock NO es confiable y hace falta un conteo fisico.
+      Lleva las fechas del hueco y cuantos movimientos se dejaron de escribir.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      stockStale: { $ref: '#/components/messages/StockStaleEvent' }
+
   # ---- Consumidos ----
+
+  pluginActivated:
+    address: plugin.activated
+    description: >
+      (Consumido) Solo interesa code = 'inventory.kardex'. Marca active en el read-model,
+      cierra el hueco abierto y emite inventory.stock.stale. Este servicio es de pago: sin
+      el plugin activo NO se lleva inventario.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      pluginActivated: { $ref: '#/components/messages/PluginEvent' }
+
+  pluginDeactivated:
+    address: plugin.deactivated
+    description: >
+      (Consumido) Marca disabled y abre un hueco. A partir de aqui las facturas emitidas NO
+      mueven el stock. El kardex historico se conserva, solo deja de crecer.
+    servers: [{ $ref: '#/servers/rabbitmq' }]
+    bindings:
+      amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
+    messages:
+      pluginDeactivated: { $ref: '#/components/messages/PluginEvent' }
 
   orgUpdated:
     address: organization.org.updated
@@ -116,7 +172,9 @@ channels:
 
   establishmentCreated:
     address: organization.establishment.created
-    description: (Consumido) se creó un establecimiento. Opcional: auto-provisiona bodega asociada.
+    description: >
+      (Consumido) se creó un establecimiento. Auto-provisiona su bodega, idempotente.
+      NO es opcional: de esta bodega descuenta toda venta emitida por ese establecimiento.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
@@ -156,9 +214,12 @@ channels:
   invoiceIssued:
     address: billing.invoice.issued
     description: >
-      (Consumido) billing emitió factura. Por cada línea con producto tracked:
-      si hay reserva activa por invoice_draft, la confirma; si no, genera sale_out
-      directo (validando allow_negative_stock).
+      (Consumido) billing emitió factura. Resuelve la bodega una vez por factura a partir
+      de establishmentId, con respaldo en la bodega PRINCIPAL. Por cada línea con producto
+      tracked genera sale_out directo con accounting_nature = cogs. Sin reservas: el
+      descuento ocurre al emitir, no en borrador. El movimiento se escribe siempre, aunque
+      la posición quede negativa: la factura ya está firmada. allow_negative_stock NO se
+      evalúa aquí, el bloqueo pertenece a billing y al punto de venta antes de emitir.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
@@ -168,8 +229,9 @@ channels:
   invoiceVoided:
     address: billing.invoice.voided
     description: >
-      (Consumido) billing anuló factura. Reposición del stock: genera adjustment_in
-      con el costo del movimiento original (buscado por reference).
+      (Consumido) billing anuló factura. Repone leyendo los sale_out por reference y
+      devolviendo cada uno a su costo original, nunca al promedio vigente. Genera
+      adjustment_in con accounting_nature = inventory_in. Con FIFO crea un layer nuevo.
     servers: [{ $ref: '#/servers/rabbitmq' }]
     bindings:
       amqp: { is: routingKey, exchange: { name: crm.events, type: topic, durable: true, vhost: / } }
@@ -223,6 +285,21 @@ operations:
     action: send
     channel: { $ref: '#/channels/stockNegative' }
 
+  publishStockStale:
+    action: send
+    channel: { $ref: '#/channels/stockStale' }
+    summary: Avisa de que el stock quedo desactualizado mientras el modulo estuvo apagado.
+
+  consumePluginActivated:
+    action: receive
+    channel: { $ref: '#/channels/pluginActivated' }
+    summary: Reactiva el seguimiento de stock y cierra el hueco.
+
+  consumePluginDeactivated:
+    action: receive
+    channel: { $ref: '#/channels/pluginDeactivated' }
+    summary: Corta el seguimiento de stock y abre un hueco.
+
   consumeOrgUpdated:
     action: receive
     channel: { $ref: '#/channels/orgUpdated' }
@@ -231,6 +308,7 @@ operations:
   consumeEstablishmentCreated:
     action: receive
     channel: { $ref: '#/channels/establishmentCreated' }
+    summary: Crea la bodega del establecimiento (idempotente). Obligatorio, no opcional.
 
   consumeProductCreated:
     action: receive
@@ -250,17 +328,19 @@ operations:
   consumeInvoiceIssued:
     action: receive
     channel: { $ref: '#/channels/invoiceIssued' }
-    summary: Confirma reserva o genera sale_out directo por cada línea tracked.
+    summary: Genera sale_out directo por línea tracked, en la bodega del establecimiento emisor.
 
   consumeInvoiceVoided:
     action: receive
     channel: { $ref: '#/channels/invoiceVoided' }
-    summary: Repone stock con adjustment_in al costo original.
+    summary: Repone stock con adjustment_in al costo original, leído del kardex.
 
   consumePurchaseReceived:
     action: receive
     channel: { $ref: '#/channels/purchaseReceived' }
-    summary: Registra purchase_in aplicando ValuationStrategy.
+    summary: >
+      Registra purchase_in aplicando ValuationStrategy. Escrito por adelantado: no existe
+      servicio de compras, así que hoy nadie publica este evento.
 
 components:
 
@@ -310,6 +390,20 @@ components:
       contentType: application/json
       traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
       payload: { $ref: '#/components/schemas/StockNegativePayload' }
+
+    StockStaleEvent:
+      name: inventory.stock.stale
+      title: Stock no confiable tras reactivar el modulo
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/StockStalePayload' }
+
+    PluginEvent:
+      name: plugin.activated / plugin.deactivated
+      title: Plugin activado o desactivado (consumido)
+      contentType: application/json
+      traits: [{ $ref: '#/components/messageTraits/eventEnvelope' }]
+      payload: { $ref: '#/components/schemas/PluginPayload' }
 
     OrgUpdatedEvent:
       name: organization.org.updated
@@ -387,7 +481,7 @@ components:
 
     StockMovementPayload:
       type: object
-      required: [movementId, organizationId, productId, warehouseId, type, quantity]
+      required: [movementId, organizationId, productId, warehouseId, type, quantity, accountingNature]
       properties:
         movementId: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
@@ -402,6 +496,18 @@ components:
         currencyCode: { type: string, example: USD }
         referenceType: { type: string, nullable: true, description: 'invoice, purchase_order, adjustment, transfer' }
         referenceId: { type: string, format: uuid, nullable: true }
+        accountingNature:
+          type: string
+          enum: [inventory_in, inventory_gain, cogs, expense, shrinkage, internal_transfer]
+          description: >
+            Qué significa el movimiento para la contabilidad. El futuro generador de asientos
+            lo combina con la cuenta del producto. Se emite siempre.
+        reasonCode:
+          type: string
+          nullable: true
+          enum: [physical_count, damage, expiration, theft, internal_use, correction, opening_balance]
+          description: Solo en ajustes. Es de donde sale accountingNature.
+        lotId: { type: string, format: uuid, nullable: true, description: Reservado. Siempre null en esta fase. }
         newOnHand: { type: string, description: Posición on_hand tras el movimiento. }
         newAverageCostCents: { type: integer, format: int64, description: Nuevo promedio (para valorización weighted_average). }
 
@@ -444,6 +550,28 @@ components:
 
     # --- Payloads de eventos consumidos ---
 
+    StockStalePayload:
+      type: object
+      required: [organizationId, startedAt, endedAt, skippedMovements]
+      properties:
+        organizationId: { type: string, format: uuid }
+        startedAt: { type: string, format: date-time, description: Cuando se desactivo el modulo. }
+        endedAt: { type: string, format: date-time, description: Cuando se reactivo. }
+        skippedMovements:
+          type: integer
+          description: >
+            Cuantos movimientos de kardex se dejaron de escribir durante el hueco. No se
+            reprocesan: la respuesta correcta es un conteo fisico con SetOpeningBalance.
+
+    PluginPayload:
+      type: object
+      required: [organizationId, code]
+      properties:
+        organizationId: { type: string, format: uuid }
+        pluginId: { type: string, format: uuid }
+        code: { type: string, example: inventory.kardex, description: Solo interesa inventory.kardex. }
+        activationSource: { type: string, nullable: true }
+
     OrgUpdatedPayload:
       type: object
       required: [organizationId]
@@ -477,25 +605,38 @@ components:
 
     InvoiceIssuedPayload:
       type: object
-      required: [invoiceId, organizationId, warehouseId, lines]
+      required: [invoiceId, organizationId, establishmentId, lines]
       properties:
         invoiceId: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
-        warehouseId:
+        countryCode: { type: string }
+        establishmentId:
           type: string
           format: uuid
           description: >
-            Bodega desde la que sale el stock. billing la selecciona (típicamente
-            la default de la organización, o la del punto de emisión).
+            De aqui sale la bodega. billing NO conoce bodegas y nunca ha enviado
+            warehouseId: quien resuelve es inventory, buscando la bodega de este
+            establecimiento y cayendo en la PRINCIPAL si no la encuentra.
+        emissionPointId: { type: string, format: uuid }
+        currencyCode: { type: string }
         lines:
           type: array
           items:
             type: object
             required: [productId, quantity]
             properties:
-              lineId: { type: string, format: uuid }
-              productId: { type: string, format: uuid }
-              quantity: { type: string }
+              productId: { type: string, format: uuid, description: Siempre presente; billing no admite lineas sin producto. }
+              description: { type: string }
+              quantity:
+                type: number
+                description: >
+                  OJO: billing lo modela como `number` de JavaScript, no como DECIMAL
+                  string. inventory debe convertirlo con Decimal.js ANTES de operar, nunca
+                  sumar o restar el numero crudo. Es la unica entrada de todo el servicio
+                  que llega como float, y por eso la unica donde se puede perder precision.
+              unitPriceCents: { type: integer }
+              discountCents: { type: integer }
+              subtotalCents: { type: integer }
 
     InvoiceVoidedPayload:
       type: object
