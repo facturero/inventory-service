@@ -2,7 +2,7 @@ name: Deploy inventory-service
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 env:
