@@ -42,7 +42,11 @@ async function main(): Promise<void> {
   await sequelize.authenticate();
   await sequelize.sync();
 
-  const uowGateway = new SequelizeUnitOfWorkFactory(config.PLUGIN_CATALOG_SERVICE_URL ? pluginCatalogColdStart : undefined);
+  let relay: OutboxRelay | undefined;
+  const uowGateway = new SequelizeUnitOfWorkFactory(
+    config.PLUGIN_CATALOG_SERVICE_URL ? pluginCatalogColdStart : undefined,
+    (tx) => relay?.attachToTransaction(tx),
+  );
   const repos = readOnlyRepositories;
 
   const app = createApp({
@@ -65,7 +69,7 @@ async function main(): Promise<void> {
   console.log(`[inventory-service] corriendo en puerto ${config.PORT}`);
 
   if (config.RABBITMQ_URL) {
-    const relay = new OutboxRelay({
+    relay = new OutboxRelay({
       sequelize,
       rabbitmqUrl: config.RABBITMQ_URL,
       exchange: 'crm.events',

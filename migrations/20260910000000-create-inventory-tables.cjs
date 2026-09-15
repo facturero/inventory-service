@@ -118,7 +118,11 @@ module.exports = {
     });
     // Sin cláusula WHERE: MySQL no tiene índices parciales. quantity_remaining
     // entra en la clave para que el filtro `> 0` (capas activas) use el índice.
-    await queryInterface.addIndex('stock_layers', ['product_id', 'warehouse_id', 'quantity_remaining', 'entered_at']);
+    // Nombre explícito: el que autogenera Sequelize (stock_layers_ + las 4
+    // columnas) pasa los 64 caracteres que MySQL permite en un identificador.
+    await queryInterface.addIndex('stock_layers', ['product_id', 'warehouse_id', 'quantity_remaining', 'entered_at'], {
+      name: 'stock_layers_active_queue',
+    });
 
     // 5. reservations — se crea vacía, NADIE la escribe en esta fase.
     await queryInterface.createTable('reservations', {

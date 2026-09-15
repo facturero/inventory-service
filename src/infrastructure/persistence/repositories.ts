@@ -655,10 +655,16 @@ export class SequelizeUnitOfWork implements UnitOfWork {
 }
 
 export class SequelizeUnitOfWorkFactory {
-  constructor(private readonly coldStart?: (organizationId: string, pluginCode: string) => Promise<boolean | null>) {}
+  constructor(
+    private readonly coldStart?: (organizationId: string, pluginCode: string) => Promise<boolean | null>,
+    private readonly onCommit?: (tx: Transaction) => void,
+  ) {}
 
   async begin(): Promise<SequelizeUnitOfWork> {
     const tx = await sequelize.transaction();
+    // El relay publica el outbox justo tras el commit; sin este enganche los
+    // eventos esperan los 30s del timer de respaldo del relay.
+    this.onCommit?.(tx);
     return new SequelizeUnitOfWork(tx, this.coldStart);
   }
 }
