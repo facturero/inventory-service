@@ -22,5 +22,5 @@ COPY migrations/ migrations/
 COPY .sequelizerc .sequelizerc
 COPY sequelize.config.cjs sequelize.config.cjs
 USER app
-EXPOSE 3010
+EXPOSE 3013
 CMD ["node", "dist/main.js"]

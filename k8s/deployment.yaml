@@ -94,7 +94,7 @@ spec:
             - name: CORS_ORIGIN
               value: "https://steep-geology-napping.ngrok-free.dev"
             - name: PLUGIN_CATALOG_SERVICE_URL
-              value: "http://plugin-catalog-service-node:3011"
+              value: "http://plugin-catalog-service:3011"
             - name: INTERNAL_USER_ID
               value: "00000000-0000-0000-0000-000000000000"
             - name: OTEL_SERVICE_NAME
