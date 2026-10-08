@@ -63,6 +63,39 @@ export function warehouseCreatedEvent(warehouse: Warehouse): DomainEvent {
   });
 }
 
+export function warehouseUpdatedEvent(
+  warehouse: Warehouse,
+  previous: { name: string; address: string | null; establishmentId: string | null; isDefault: boolean },
+): DomainEvent {
+  const p = warehouse.toPersistence();
+  return domainEvent({
+    type: 'inventory.warehouse.updated',
+    aggregateType: 'warehouse',
+    aggregateId: warehouse.id,
+    organizationId: warehouse.organizationId,
+    payload: {
+      warehouseId: p.id,
+      establishmentId: p.establishmentId,
+      code: p.code,
+      name: p.name,
+      address: p.address,
+      isDefault: p.isDefault,
+      previous,
+    },
+  });
+}
+
+export function warehouseDeactivatedEvent(warehouse: Warehouse): DomainEvent {
+  const p = warehouse.toPersistence();
+  return domainEvent({
+    type: 'inventory.warehouse.deactivated',
+    aggregateType: 'warehouse',
+    aggregateId: warehouse.id,
+    organizationId: warehouse.organizationId,
+    payload: { warehouseId: p.id, establishmentId: p.establishmentId, code: p.code, name: p.name },
+  });
+}
+
 export function stockEnteredEvent(movement: StockMovement, position: StockPosition): DomainEvent {
   return domainEvent({
     type: 'inventory.stock.entered',

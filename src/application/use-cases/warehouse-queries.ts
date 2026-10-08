@@ -1,6 +1,7 @@
 import { Warehouse } from '../../domain/entities.js';
 import { CannotDeactivateWarehouseWithStockError, WarehouseNotFoundError } from '../../domain/errors.js';
 import type { UnitOfWorkGateway } from '../ports.js';
+import { warehouseDeactivatedEvent } from '../events.js';
 
 export class ListWarehousesUseCase {
   constructor(private readonly repos: { warehouses: { listByOrganization(organizationId: string): Promise<Warehouse[]> } }) {}
@@ -46,6 +47,7 @@ export class DeactivateWarehouseUseCase {
 
       warehouse.deactivate();
       await uow.warehouses.save(warehouse);
+      await uow.outbox.add(warehouseDeactivatedEvent(warehouse));
       await uow.commit();
     } catch (err) {
       await uow.rollback();

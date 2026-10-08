@@ -1,6 +1,7 @@
 import { Warehouse } from '../../domain/entities.js';
 import { MultipleDefaultWarehousesError, WarehouseNotFoundError } from '../../domain/errors.js';
 import type { UnitOfWorkGateway } from '../ports.js';
+import { warehouseUpdatedEvent } from '../events.js';
 
 export class UpdateWarehouseUseCase {
   constructor(private readonly uow: UnitOfWorkGateway) {}
@@ -32,6 +33,7 @@ export class UpdateWarehouseUseCase {
         throw new MultipleDefaultWarehousesError();
       }
 
+      const before = warehouse.toPersistence();
       warehouse.update({
         name: input.name,
         address: input.address,
@@ -40,6 +42,15 @@ export class UpdateWarehouseUseCase {
       });
       await uow.warehouses.save(warehouse);
 
+      // Mover una bodega de establecimiento o cambiar cuál es la predeterminada afecta de dónde sale el stock: queda en la bitácora.
+      await uow.outbox.add(
+        warehouseUpdatedEvent(warehouse, {
+          name: before.name,
+          address: before.address,
+          establishmentId: before.establishmentId,
+          isDefault: before.isDefault,
+        }),
+      );
       await uow.commit();
       return warehouse;
     } catch (err) {
