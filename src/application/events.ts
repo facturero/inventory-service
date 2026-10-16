@@ -41,6 +41,8 @@ export function movementPayload(movement: StockMovement, position: StockPosition
     accountingNature: movement.accountingNature,
     reasonCode: movement.reasonCode,
     lotId: movement.lotId,
+    // Cuándo ocurrió el movimiento: accounting-service saca de aquí la fecha contable (sin ella usaría la hora de llegada del mensaje).
+    occurredAt: movement.createdAt.toISOString(),
     newOnHand: position.quantityOnHand.toFixed(),
     newAverageCostCents: position.averageCost.toCents(),
   };

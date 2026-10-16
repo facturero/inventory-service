@@ -40,6 +40,38 @@ describe('HandleInvoiceIssued', () => {
     expect(pos2?.quantityOnHand.toFixed()).toBe('5.0000');
   });
 
+  it.each(['04', '05'])('un comprobante tipo %s (nota de crédito/débito) NO descuenta stock: solo la factura es una venta', async (documentTypeCode) => {
+    const uow = new InMemoryUnitOfWork();
+    seedWarehouse(uow, { id: UUID.WH, organizationId: UUID.ORG, code: 'PRINCIPAL', isDefault: true });
+    seedProduct(uow, { id: UUID.PRODUCT, organizationId: UUID.ORG });
+    seedPosition(uow, { organizationId: UUID.ORG, productId: UUID.PRODUCT, warehouseId: UUID.WH, quantityOnHand: '10.0000' });
+
+    const result = await issuedUseCase(uow).execute({
+      invoiceId: '00000000-0000-0000-0000-000000000202',
+      organizationId: UUID.ORG,
+      establishmentId: null,
+      documentTypeCode,
+      // Una nota de crédito clona las líneas de la factura: sin el filtro se descontaban otra vez.
+      lines: [{ productId: UUID.PRODUCT, quantity: 2 }],
+    });
+
+    expect(result).toEqual({ writtenLines: 0, skippedLines: 0 });
+    expect(await uow.stockMovements.listByReference(UUID.ORG, 'invoice', '00000000-0000-0000-0000-000000000202', 'sale_out')).toHaveLength(0);
+    expect((await uow.stockPositions.find(UUID.ORG, UUID.WH, UUID.PRODUCT))?.quantityOnHand.toFixed()).toBe('10.0000');
+  });
+
+  it('una factura que declara su tipo 01 sí descuenta', async () => {
+    const uow = new InMemoryUnitOfWork();
+    seedWarehouse(uow, { id: UUID.WH, organizationId: UUID.ORG, code: 'PRINCIPAL', isDefault: true });
+    seedProduct(uow, { id: UUID.PRODUCT, organizationId: UUID.ORG });
+    seedPosition(uow, { organizationId: UUID.ORG, productId: UUID.PRODUCT, warehouseId: UUID.WH, quantityOnHand: '10.0000' });
+    const result = await issuedUseCase(uow).execute({
+      invoiceId: '00000000-0000-0000-0000-000000000203', organizationId: UUID.ORG, establishmentId: null, documentTypeCode: '01',
+      lines: [{ productId: UUID.PRODUCT, quantity: 2 }],
+    });
+    expect(result.writtenLines).toBe(1);
+  });
+
   it('reprocesar la misma factura no duplica movimientos', async () => {
     const uow = new InMemoryUnitOfWork();
     seedWarehouse(uow, { id: UUID.WH, organizationId: UUID.ORG, code: 'PRINCIPAL', isDefault: true });

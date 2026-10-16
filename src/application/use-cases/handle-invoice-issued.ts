@@ -13,6 +13,8 @@ export interface InvoiceIssuedPayload {
   establishmentId: string | null;
   countryCode?: string;
   currencyCode?: string;
+  /** Tipo SRI del comprobante: 01 factura, 04 nota de crédito, 05 nota de débito. Sin él (eventos antiguos) es una factura. */
+  documentTypeCode?: string;
   lines: { productId: string; quantity: number }[];
 }
 
@@ -25,6 +27,12 @@ export class HandleInvoiceIssuedUseCase {
 
   async execute(payload: InvoiceIssuedPayload): Promise<{ writtenLines: number; skippedLines: number }> {
     const { organizationId, invoiceId, establishmentId, lines } = payload;
+
+    // Solo la FACTURA saca mercadería. `billing.invoice.issued` también lo publican las notas de crédito (que clonan las líneas de la
+    // factura) y las de débito (cuyas líneas son motivos, no productos): tratarlas como ventas descontaba el stock otra vez y, con él,
+    // generaba un segundo costo de ventas en contabilidad. La devolución de stock sigue siendo por la anulación de la factura.
+    if (payload.documentTypeCode && payload.documentTypeCode !== '01') return { writtenLines: 0, skippedLines: 0 };
+
     const uow = await this.uow.begin();
     let writtenLines = 0;
     let skippedLines = 0;

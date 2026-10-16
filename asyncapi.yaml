@@ -508,6 +508,7 @@ components:
           enum: [physical_count, damage, expiration, theft, internal_use, correction, opening_balance]
           description: Solo en ajustes. Es de donde sale accountingNature.
         lotId: { type: string, format: uuid, nullable: true, description: Reservado. Siempre null en esta fase. }
+        occurredAt: { type: string, format: date-time, description: 'Cuándo ocurrió el movimiento. accounting-service saca de aquí la fecha contable de su asiento.' }
         newOnHand: { type: string, description: Posición on_hand tras el movimiento. }
         newAverageCostCents: { type: integer, format: int64, description: Nuevo promedio (para valorización weighted_average). }
 

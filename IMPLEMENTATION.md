@@ -1129,3 +1129,7 @@ Queda **pendiente y no bloqueante**, para cuando exista contabilidad:
 
 Verificar que el payload de `product.product.upserted` incluya `trackStock`,
 `allowNegativeStock` y `valuationMethod`; el read-model local depende de los tres.
+
+## Solo las facturas mueven el kardex (Fase 1.4 del plan ERP)
+
+`handle-invoice-issued` ignora todo comprobante cuyo `documentTypeCode` no sea `'01'`. Antes trataba cualquier `billing.invoice.issued` como una venta: una nota de crédito (que repite las líneas de la factura) descontaba el stock por segunda vez; una nota de débito (sin producto) no tiene qué descontar. La devolución de mercadería por nota de crédito se decide en la Fase 5.
