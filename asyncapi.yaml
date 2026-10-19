@@ -654,6 +654,8 @@ components:
         purchaseOrderId: { type: string, format: uuid }
         organizationId: { type: string, format: uuid }
         warehouseId: { type: string, format: uuid }
+        receiptId: { type: string, format: uuid, nullable: true, description: 'ID de la recepción (goods_receipt). Si viene, referenceType=goods_receipt en el movimiento.' }
+        receiptNumber: { type: string, nullable: true, description: 'Número de recepción (RM-AAAA-NNNNNN).' }
         lines:
           type: array
           items:
