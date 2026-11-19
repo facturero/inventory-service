@@ -15,20 +15,20 @@ export const createWarehouseSchema = z.object({
   code: z.string().min(1, 'El código es obligatorio.').max(20),
   name: z.string().min(1, 'El nombre es obligatorio.').max(255),
   address: z.string().max(255).optional().nullable(),
-  establishmentId: z.string().uuid('El establishmentId no es válido.').optional().nullable(),
+  establishmentId: z.string().guid('El establishmentId no es válido.').optional().nullable(),
   isDefault: z.boolean().default(false),
 });
 
 export const updateWarehouseSchema = z.object({
   name: z.string().max(255).optional(),
   address: z.string().max(255).optional().nullable(),
-  establishmentId: z.string().uuid('El establishmentId no es válido.').optional().nullable(),
+  establishmentId: z.string().guid('El establishmentId no es válido.').optional().nullable(),
   isDefault: z.boolean().optional(),
 });
 
 export const adjustStockSchema = z.object({
-  productId: z.string().uuid('El productId no es válido.'),
-  warehouseId: z.string().uuid('El warehouseId no es válido.'),
+  productId: z.string().guid('El productId no es válido.'),
+  warehouseId: z.string().guid('El warehouseId no es válido.'),
   quantity: quantityString,
   unitCost: z
     .string()
@@ -40,9 +40,9 @@ export const adjustStockSchema = z.object({
 });
 
 export const transferStockSchema = z.object({
-  productId: z.string().uuid('El productId no es válido.'),
-  fromWarehouseId: z.string().uuid('El fromWarehouseId no es válido.'),
-  toWarehouseId: z.string().uuid('El toWarehouseId no es válido.'),
+  productId: z.string().guid('El productId no es válido.'),
+  fromWarehouseId: z.string().guid('El fromWarehouseId no es válido.'),
+  toWarehouseId: z.string().guid('El toWarehouseId no es válido.'),
   quantity: positiveQuantityString,
   notes: z.string().optional(),
 });
